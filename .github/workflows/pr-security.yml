@@ -187,10 +187,13 @@ jobs:
             echo "::error::[security] opengrep failed to run (exit ${status})."
             exit 1
           fi
-          errors=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' opengrep.json)
+          # Block only on ERROR-severity security rules. Audit rules flag every use of an API
+          # (every subprocess call, say), and style rules aren't security; both still reach code scanning.
+          blocking='.results[] | .rule = (.check_id | sub("^.*?\\.rules\\."; "")) | select(.extra.severity == "ERROR" and (.rule | test("\\.security\\.")) and (.rule | test("\\.audit\\.") | not))'
+          errors=$(jq "[$blocking] | length" opengrep.json)
           total=$(jq '.results | length' opengrep.json)
-          echo "[security] opengrep: ${total} findings, ${errors} at ERROR severity"
-          jq -r '.results[] | select(.extra.severity == "ERROR") | "::error file=\(.path),line=\(.start.line)::\(.check_id)"' opengrep.json
+          echo "[security] opengrep: ${total} findings, ${errors} blocking (ERROR-severity security rules, audit rules excluded)"
+          jq -r "$blocking | \"::error file=\\(.path),line=\\(.start.line)::\\(.rule)\"" opengrep.json
           [ "$errors" -eq 0 ]
 
       - name: Upload results to code scanning
