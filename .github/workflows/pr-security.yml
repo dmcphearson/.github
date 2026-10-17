@@ -107,6 +107,9 @@ jobs:
             printf "regex = '''(?i)(%s)'''\n" "$LEAK_PATTERNS"
           } > "$config"
           mkdir -p "$RUNNER_TEMP/no-ignore"
+          report="$RUNNER_TEMP/betterleaks.json"
+          # No --verbose: it prints each finding's whole line, which can expose a neighbouring match.
+          # Report only where each finding is, never its text.
           betterleaks git . \
             --log-opts="$RANGE" \
             --config "$config" \
@@ -114,7 +117,15 @@ jobs:
             --ignore-gitleaks-allow \
             --redact \
             --no-banner \
-            --verbose
+            --report-format json \
+            --report-path "$report" || status=$?
+          if [ ! -s "$report" ]; then
+            echo "::error::[security] betterleaks failed to run (exit ${status:-0})."
+            exit 1
+          fi
+          jq -r '.[] | "::error file=\(.File),line=\(.StartLine)::[security] \(.RuleID) in commit \(.Commit[0:7])"' "$report"
+          echo "[security] betterleaks: $(jq length "$report") findings"
+          [ "${status:-0}" -eq 0 ]
 
   code:
     name: Code scan
