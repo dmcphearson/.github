@@ -133,7 +133,7 @@ jobs:
         with:
           repository: opengrep/opengrep-rules
           ref: ${{ env.OPENGREP_RULES_SHA }}
-          path: ${{ runner.temp }}/rules
+          path: .opengrep-rules
           persist-credentials: false
           sparse-checkout: |
             ai
@@ -152,6 +152,8 @@ jobs:
 
       - name: Install opengrep
         run: |
+          # Checkout only writes inside the workspace; move the rules out so they aren't scanned.
+          mv .opengrep-rules "$RUNNER_TEMP/rules"
           curl -fsSLo "$RUNNER_TEMP/opengrep" "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_x86"
           echo "${OPENGREP_SHA256}  $RUNNER_TEMP/opengrep" | sha256sum -c -
           chmod +x "$RUNNER_TEMP/opengrep"
