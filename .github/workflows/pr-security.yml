@@ -167,7 +167,6 @@ jobs:
               | xargs -0 grep -l '^rules:' )
           echo "[security] Loading ${#configs[@]} rule files"
           "$RUNNER_TEMP/opengrep" scan "${configs[@]}" \
-            --no-progress-bar \
             --sarif-output=opengrep.sarif \
             --json-output=opengrep.json \
             --exclude=node_modules --exclude=vendor --exclude=dist \
