@@ -1,6 +1,7 @@
 # Shared security checks for every public repo: leaked secrets and private details (betterleaks),
-# commit identity, and code issues (opengrep). Each repo calls this from .github/workflows/security.yml,
-# and its main branch ruleset requires "security / Leaks" and "security / Code scan" to pass.
+# commit identity, code issues (opengrep), and npm and Python dependencies installed through Aikido safe-chain.
+# Each repo calls this from .github/workflows/security.yml, and its main branch ruleset requires
+# "security / Leaks", "security / Code scan" and "security / Packages" to pass.
 name: PR security
 
 on:
@@ -19,6 +20,8 @@ env:
   OPENGREP_VERSION: v1.30.1
   OPENGREP_SHA256: d3195b9d8d5ae93179f6aa5f5daaba6a920a5a09d38c5d5ae5e60924050210c4
   OPENGREP_RULES_SHA: f1d2b562b414783763fd02a6ed2736eaed622efa
+  SAFE_CHAIN_VERSION: 1.5.23
+  SAFE_CHAIN_INSTALLER_SHA256: b7eac1c7152f300b229b865193d16424ad52386d1898c75ffaf374fcb4eeed3d
 
 jobs:
   leaks:
@@ -203,3 +206,64 @@ jobs:
         with:
           sarif_file: opengrep.sarif
           category: opengrep
+
+  packages:
+    name: Packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Find npm and Python dependencies
+        id: find
+        run: |
+          npm_dirs=$(find . -name package.json -not -path '*/node_modules/*' -not -path './.git/*' -exec dirname {} \; | sort -u)
+          py_files=$(find . \( -name 'requirements*.txt' -o -name pyproject.toml \) -not -path './.git/*' -not -path '*/node_modules/*' | sort -u)
+          { echo "npm_dirs<<EOF"; echo "$npm_dirs"; echo EOF; echo "py_files<<EOF"; echo "$py_files"; echo EOF; } >> "$GITHUB_OUTPUT"
+          if [ -z "$npm_dirs$py_files" ]; then
+            echo "[security] No npm or Python dependencies; nothing to check."
+            echo "any=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "any=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install safe-chain
+        if: steps.find.outputs.any == 'true'
+        run: |
+          # The installer checks the safe-chain binary against hashes built into it; pinning the installer pins both.
+          curl -fsSLo "$RUNNER_TEMP/install-safe-chain.sh" "https://github.com/AikidoSec/safe-chain/releases/download/${SAFE_CHAIN_VERSION}/install-safe-chain.sh"
+          echo "${SAFE_CHAIN_INSTALLER_SHA256}  $RUNNER_TEMP/install-safe-chain.sh" | sha256sum -c -
+          sh "$RUNNER_TEMP/install-safe-chain.sh" --ci
+
+      - name: Install dependencies through safe-chain
+        if: steps.find.outputs.any == 'true'
+        env:
+          NPM_DIRS: ${{ steps.find.outputs.npm_dirs }}
+          PY_FILES: ${{ steps.find.outputs.py_files }}
+        run: |
+          # Downloads go through safe-chain's proxy, which blocks known malware and packages under 48 hours old.
+          # Install scripts never run, so a package is checked without executing it.
+          # Fail closed if the wrapper isn't in front of npm and pip.
+          [ -z "$NPM_DIRS" ] || npm safe-chain-verify
+          [ -z "$PY_FILES" ] || pip3 safe-chain-verify
+          while IFS= read -r dir; do
+            [ -z "$dir" ] && continue
+            echo "[security] npm dependencies in $dir"
+            if [ -f "$dir/package-lock.json" ] || [ -f "$dir/npm-shrinkwrap.json" ]; then
+              (cd "$dir" && npm ci --ignore-scripts --no-audit --no-fund)
+            else
+              (cd "$dir" && npm install --ignore-scripts --no-audit --no-fund --no-package-lock)
+            fi
+          done <<< "$NPM_DIRS"
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            echo "[security] Python dependencies in $file"
+            dest="$RUNNER_TEMP/pydeps/$(echo "$file" | tr '/.' '__')"
+            case "$file" in
+              *.txt) pip3 download --quiet -r "$file" -d "$dest" ;;
+              *) pip3 download --quiet "$(dirname "$file")" -d "$dest" ;;
+            esac
+          done <<< "$PY_FILES"
+          echo "[security] All dependencies passed safe-chain."
