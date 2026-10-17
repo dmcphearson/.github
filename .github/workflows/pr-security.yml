@@ -191,20 +191,23 @@ jobs:
             exit 1
           fi
           # Block only on ERROR-severity security rules. Audit rules flag every use of an API
-          # (every subprocess call, say), and style rules aren't security; both still reach code scanning.
+          # (every subprocess call, say), and style rules aren't security.
           blocking='.results[] | .rule = (.check_id | sub("^.*?\\.rules\\."; "")) | select(.extra.severity == "ERROR" and (.rule | test("\\.security\\.")) and (.rule | test("\\.audit\\.") | not))'
           errors=$(jq "[$blocking] | length" opengrep.json)
           total=$(jq '.results | length' opengrep.json)
           echo "[security] opengrep: ${total} findings, ${errors} blocking (ERROR-severity security rules, audit rules excluded)"
           jq -r "$blocking | \"::error file=\\(.path),line=\\(.start.line)::\\(.rule)\"" opengrep.json
+          # Code scanning gets only the blocking findings, so an open alert always means a real issue.
+          ids=$(jq -c "[$blocking | .check_id] | unique" opengrep.json)
+          jq --argjson ids "$ids" '.runs[].results |= map(select(.ruleId as $r | $ids | index($r)))' opengrep.sarif > opengrep-blocking.sarif
           [ "$errors" -eq 0 ]
 
       - name: Upload results to code scanning
-        if: always() && hashFiles('opengrep.sarif') != ''
+        if: always() && hashFiles('opengrep-blocking.sarif') != ''
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
-          sarif_file: opengrep.sarif
+          sarif_file: opengrep-blocking.sarif
           category: opengrep
 
   packages:
