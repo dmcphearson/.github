@@ -1,0 +1,189 @@
+# Shared security checks for every public repo: leaked secrets and private details (betterleaks),
+# commit identity, and code issues (opengrep). Each repo calls this from .github/workflows/security.yml,
+# and its main branch ruleset requires "security / Leaks" and "security / Code scan" to pass.
+name: PR security
+
+on:
+  workflow_call:
+    secrets:
+      LEAK_PATTERNS:
+        description: Regex of private identifiers (employer, home network, personal emails, local paths). Kept in a secret so the list itself stays private.
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  BETTERLEAKS_VERSION: 1.9.0
+  BETTERLEAKS_SHA256: f8b185a39ffcece2a1ca82bf3a4e7435cd81963ffd16b7a9128daf75f35f6de7
+  OPENGREP_VERSION: v1.30.1
+  OPENGREP_SHA256: d3195b9d8d5ae93179f6aa5f5daaba6a920a5a09d38c5d5ae5e60924050210c4
+  OPENGREP_RULES_SHA: f1d2b562b414783763fd02a6ed2736eaed622efa
+
+jobs:
+  leaks:
+    name: Leaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Work out the commits to check
+        id: range
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ]; then
+            range="$PUSH_BEFORE..$PUSH_AFTER"
+          else
+            range="$PUSH_AFTER~1..$PUSH_AFTER"
+            git rev-parse -q --verify "$PUSH_AFTER~1" >/dev/null || range="$PUSH_AFTER"
+          fi
+          echo "range=$range" >> "$GITHUB_OUTPUT"
+          echo "[security] Checking commits $range ($(git rev-list --count "$range") commits)"
+
+      - name: Commit identity
+        env:
+          RANGE: ${{ steps.range.outputs.range }}
+        run: |
+          # Only the GitHub noreply address, bots and GitHub's own merges may appear in commit metadata.
+          bad=0
+          while read -r sha author committer; do
+            for email in "$author" "$committer"; do
+              case "$email" in
+                37880339+dmcphearson@users.noreply.github.com|noreply@github.com|*\[bot\]@users.noreply.github.com) ;;
+                *) echo "::error::[security] Commit ${sha:0:7} uses an email that isn't the GitHub noreply address."; bad=1 ;;
+              esac
+            done
+          done < <(git log --format='%H %ae %ce' "$RANGE")
+          exit $bad
+
+      - name: Private details in commit messages
+        env:
+          RANGE: ${{ steps.range.outputs.range }}
+          LEAK_PATTERNS: ${{ secrets.LEAK_PATTERNS }}
+        run: |
+          if [ -z "$LEAK_PATTERNS" ]; then
+            echo "::error::[security] The LEAK_PATTERNS secret is missing (Actions and Dependabot secrets both need it)."
+            exit 1
+          fi
+          bad=0
+          for sha in $(git rev-list "$RANGE"); do
+            if git log -1 --format='%B' "$sha" | grep -Eiq -- "$LEAK_PATTERNS"; then
+              echo "::error::[security] Commit ${sha:0:7}'s message contains a private identifier."
+              bad=1
+            fi
+          done
+          exit $bad
+
+      - name: Install betterleaks
+        run: |
+          curl -fsSLo bl.tar.gz "https://github.com/betterleaks/betterleaks/releases/download/v${BETTERLEAKS_VERSION}/betterleaks_${BETTERLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${BETTERLEAKS_SHA256}  bl.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin" && tar -xzf bl.tar.gz -C "$RUNNER_TEMP/bin" betterleaks && rm bl.tar.gz
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Scan the changes for secrets and private details
+        env:
+          RANGE: ${{ steps.range.outputs.range }}
+          LEAK_PATTERNS: ${{ secrets.LEAK_PATTERNS }}
+        run: |
+          # The config lives outside the repo, and allow comments and ignore files are ignored,
+          # so a pull request can't switch its own checks off.
+          config="$RUNNER_TEMP/betterleaks.toml"
+          {
+            printf '[extend]\nuseDefault = true\n\n'
+            printf '[[rules]]\nid = "private-identifier"\n'
+            printf 'description = "Private identifier: employer, home network, personal email or local path"\n'
+            printf "regex = '''(?i)(%s)'''\n" "$LEAK_PATTERNS"
+          } > "$config"
+          mkdir -p "$RUNNER_TEMP/no-ignore"
+          betterleaks git . \
+            --log-opts="$RANGE" \
+            --config "$config" \
+            --gitleaks-ignore-path "$RUNNER_TEMP/no-ignore" \
+            --ignore-gitleaks-allow \
+            --redact \
+            --no-banner \
+            --verbose
+
+  code:
+    name: Code scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Checkout opengrep rules
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: opengrep/opengrep-rules
+          ref: ${{ env.OPENGREP_RULES_SHA }}
+          path: ${{ runner.temp }}/rules
+          persist-credentials: false
+          sparse-checkout: |
+            ai
+            bash
+            dockerfile
+            generic
+            go
+            html
+            javascript
+            json
+            python
+            swift
+            terraform
+            typescript
+            yaml
+
+      - name: Install opengrep
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/opengrep" "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_x86"
+          echo "${OPENGREP_SHA256}  $RUNNER_TEMP/opengrep" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/opengrep"
+
+      - name: Scan
+        run: |
+          # Rule test fixtures sit beside the rules; only the rule files are loaded.
+          configs=()
+          while IFS= read -r f; do configs+=(--config "$f"); done < <(
+            find "$RUNNER_TEMP/rules" -type f \( -name '*.yaml' -o -name '*.yml' \) ! -name '*.test.yaml' ! -name '*.test.yml' ! -path '*/.github/*' -print0 \
+              | xargs -0 grep -l '^rules:' )
+          echo "[security] Loading ${#configs[@]} rule files"
+          "$RUNNER_TEMP/opengrep" scan "${configs[@]}" \
+            --no-progress-bar \
+            --sarif-output=opengrep.sarif \
+            --json-output=opengrep.json \
+            --exclude=node_modules --exclude=vendor --exclude=dist \
+            . || status=$?
+          if [ "${status:-0}" -ne 0 ] && [ ! -s opengrep.json ]; then
+            echo "::error::[security] opengrep failed to run (exit ${status})."
+            exit 1
+          fi
+          errors=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' opengrep.json)
+          total=$(jq '.results | length' opengrep.json)
+          echo "[security] opengrep: ${total} findings, ${errors} at ERROR severity"
+          jq -r '.results[] | select(.extra.severity == "ERROR") | "::error file=\(.path),line=\(.start.line)::\(.check_id)"' opengrep.json
+          [ "$errors" -eq 0 ]
+
+      - name: Upload results to code scanning
+        if: always() && hashFiles('opengrep.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: opengrep.sarif
+          category: opengrep
