@@ -9,3 +9,5 @@ Shared GitHub Actions for dmcphearson's public repos.
 - **Packages**: npm and Python dependencies install through Aikido safe-chain, which blocks known malware; repos without them pass straight through.
 
 Each repo calls it from `.github/workflows/security.yml` and passes its `LEAK_PATTERNS` secret (set for both Actions and Dependabot). Tool versions, checksums and actions are pinned.
+
+`SECURITY.md` is the default security policy for every public repo that doesn't have its own: report vulnerabilities through private vulnerability reporting.
