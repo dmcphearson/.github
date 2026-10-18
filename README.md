@@ -8,6 +8,6 @@ Shared GitHub Actions for dmcphearson's public repos.
 - **Code scan**: opengrep with the community rules; ERROR-severity security rules (audit rules excluded) fail the check. Only those blocking findings go to the repo's code scanning alerts, so an open alert is always a real issue.
 - **Packages**: npm and Python dependencies install through Aikido safe-chain, which blocks known malware; repos without them pass straight through.
 
-Each repo calls it from `.github/workflows/security.yml` and passes its `LEAK_PATTERNS` secret (set for both Actions and Dependabot). Tool versions, checksums and actions are pinned.
+Each repo calls it from `.github/workflows/security.yml` and passes its `LEAK_PATTERNS` Actions secret. Tool versions, checksums and actions are pinned.
 
 `SECURITY.md` is the default security policy for every public repo that doesn't have its own: report vulnerabilities through private vulnerability reporting.
